@@ -255,6 +255,7 @@ setup_args = {
         ('buildbot.worker', [
             ('buildbot.worker.base', ['Worker']),
             ('buildbot.worker.ec2', ['EC2LatentWorker']),
+            ('buildbot.worker.slurm', ['SLURMLatentWorker']),
             ('buildbot.worker.libvirt', ['LibVirtWorker']),
             ('buildbot.worker.openstack', ['OpenStackLatentWorker']),
             ('buildbot.worker.docker', ['DockerLatentWorker']),

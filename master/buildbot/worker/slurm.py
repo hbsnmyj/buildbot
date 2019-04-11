@@ -14,22 +14,23 @@ from buildbot.worker_transition import reportDeprecatedWorkerNameUsage
 
 import re
 import subprocess
+import time
 
 class SLURMLatentWorker(AbstractLatentWorker):
-    def __init__(self, worker_name, password, host, username, buildbot_path, working_directory, batch_file, job_time, partition):
+    def __init__(self, name, password, host, username, buildbot_path, working_directory, batch_file, job_time, partition, **kwargs):
         self.host = host
         self.username = username
-        self.worker_name = worker_name
+        self.worker_name = name
         self.instance = None
         self.buildbot_path = buildbot_path
         self.working_directory = working_directory
-        self.batch_file = batch_file
+        self.batch_file = buildbot_path + "/" + batch_file
         self.job_time = job_time
         self.partition = partition
         self._poll_resolution = 5
-        self.host_string = "%s@%s" %(self.host, self.username)
+        self.host_string = "%s@%s" %(self.username, self.host)
 
-        super().__init__(username, password, **kwargs)
+        super().__init__(name, password, **kwargs)
 
     def start_instance(self, build):
         if self.instance is not None:
@@ -37,21 +38,26 @@ class SLURMLatentWorker(AbstractLatentWorker):
         return threads.deferToThread(self._start_instance)
 
     def _start_instance(self):
-        cd_command = "echo cd %s" % self.working_directory;
-        sbatch_command = "echo sbatch %s %s %s -p %s --time %s --job-name=%s" % (self.batch_file, \
-                self.worker_name, self.partition, self._get_sec(self.job_time), self.job_time, \
-                "worker")
+        cd_command = "cd %s" % self.working_directory;
+        sbatch_command = "sbatch %s %s %s %s -p %s --time %s --job-name=%s" % (self.batch_file,
+                self.buildbot_path,
+                self.worker_name, self._get_sec(self.job_time), self.partition, 
+                self.job_time, "worker")
         command = "%s && %s" % (cd_command, sbatch_command)
+
         result = subprocess.run(['ssh',self.host_string, command], capture_output=True)
-        match = re.search(r'Submitted batch job (\d+)', result.output)
+        match = re.search(r'Submitted batch job (\d+)', result.stdout.decode("utf-8"))
         if match:
             self.instance = {"jobid":match.group(1), "state":"PENDING"}
+            log.msg("%s %s submitting job %s, command:\n%s", self.__class__.__name__, self.worker_name, self.instance["jobid"],command)
         else:
-            raise LatentWorkerFailedToSubstantiate("Submitted job failed:" + result.output)
+            raise LatentWorkerFailedToSubstantiate("Submitted job failed:" +
+                    "command is " + command,
+                    result.stdout.decode("utf-8") + "\n" + result.stderr.decode("utf-8"))
 
         instance_id, start_time = self._wait_for_instance()
         if None not in [instance_id, start_time]:
-            return [intsance_id, start_time]
+            return [instance_id, start_time]
         else:
             self.failed_to_start(self.instance["jobid"], self.instance["state"])
 
@@ -61,33 +67,49 @@ class SLURMLatentWorker(AbstractLatentWorker):
         interval = self._poll_resolution
 
         while self.instance["state"] == "PENDING":
-            time.sleep(_poll_resolution)
-            duration += _poll_resolution
+            time.sleep(self._poll_resolution)
+            duration += self._poll_resolution
             log.msg("%s %s wating for job %s to start, time elapsed: %s seconds.", \
                     self.__class__.__name__, self.worker_name, self.instance, duration)
-            if _poll_resolution < 300:
-                _poll_resolution *= 2
+            if self._poll_resolution < 300:
+                self._poll_resolution *= 2
             command = "scontrol show jobid=%s" % self.instance['jobid']
             result = subprocess.run(['ssh',self.host_string, command], capture_output=True)
-            match = re.search(r'JobState=([A-Za-z_]*) ', result.output)
+            match = re.search(r'JobState=([A-Za-z_]*) ', result.stdout.decode("utf-8"))
             if not match:
-                raise LatentWorkerFailedToSubstantiate("Submitted job failed:" + result.output)
+                raise LatentWorkerFailedToSubstantiate("Submitted job failed:" +
+                        result.stdout.decode("utf-8") + "\n" + result.stderr.decode("utf-8"))
             self.instance["state"] = match.group(1)
+            match2 = re.search(r'^\s*NodeList=(\S+)', result.stdout.decode("utf-8"), re.MULTILINE)
+            log.msg("", result.stdout.decode("utf-8"))
+            if match2:
+                self.instance["nodelist"]=match2.group(1)
+            else:
+                self.instance["nodelist"]=None
 
-        if self.instance["state"] = "RUNNING":
+        if self.instance["state"] == "RUNNING":
             minutes = duration // 60
             seconds = duration % 60
             start_time = '%02d:%02d:%02d' % (minutes // 60, minutes % 60, seconds)
 
             return self.instance["jobid"], start_time
-        else
-            self.failed_to_start(self.instance["id"], self.instance.instance['state'])
+        else:
+            self.failed_to_start(self.instance["jobid"], self.instance['state'])
 
     def stop_instance(self, fast=False):
         return threads.deferToThread(self._stop_instance, fast)
 
     def _stop_instance(self, fast):
-        pass
+        command = "/bin/bash %s/worker-slurm-stop.sh %s %s %s" % \
+                (self.buildbot_path, self.buildbot_path, self.worker_name, self.instance["nodelist"])
+        log.msg("%s %s wating for job %s to stop.", self.__class__.__name__, self.worker_name, self.instance)
+        result = subprocess.run(['ssh',self.host_string, command], capture_output=True)
+        log.msg("Command: %s", command)
+        log.msg("Output: %s", result.stdout.decode("utf-8"))
+        command2 = "scancel %s" % self.instance["jobid"]
+        result2 = subprocess.run(['ssh',self.host_string, command2], capture_output=True)
+        log.msg("Command: %s", command2)
+        log.msg("Output: %s", result2.stdout.decode("utf-8"))
 
     def _get_sec(self, time_str):
         h, m, s = time_str.split(':')
