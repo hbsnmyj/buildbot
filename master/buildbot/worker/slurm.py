@@ -39,10 +39,9 @@ class SLURMLatentWorker(AbstractLatentWorker):
 
     def _start_instance(self):
         cd_command = "cd %s" % self.working_directory;
-        sbatch_command = "sbatch %s %s %s %s -p %s --time %s --job-name=%s" % (self.batch_file,
-                self.buildbot_path,
-                self.worker_name, self._get_sec(self.job_time), self.partition, 
-                self.job_time, "worker")
+        sbatch_command = "sbatch -p %s --time %s --job-name=%s %s %s %s %s" % (
+                self.partition, self.job_time, "worker", self.batch_file,
+                self.buildbot_path, self.worker_name, self._get_sec(self.job_time))
         command = "%s && %s" % (cd_command, sbatch_command)
 
         result = subprocess.run(['ssh',self.host_string, command], capture_output=True)
@@ -97,6 +96,8 @@ class SLURMLatentWorker(AbstractLatentWorker):
             self.failed_to_start(self.instance["jobid"], self.instance['state'])
 
     def stop_instance(self, fast=False):
+        if self.instance is None:
+            return defer.succeed(None)
         return threads.deferToThread(self._stop_instance, fast)
 
     def _stop_instance(self, fast):
@@ -110,6 +111,7 @@ class SLURMLatentWorker(AbstractLatentWorker):
         result2 = subprocess.run(['ssh',self.host_string, command2], capture_output=True)
         log.msg("Command: %s", command2)
         log.msg("Output: %s", result2.stdout.decode("utf-8"))
+        self.instance = None
 
     def _get_sec(self, time_str):
         h, m, s = time_str.split(':')
